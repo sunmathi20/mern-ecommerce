@@ -10,11 +10,13 @@
     "seed": "node seed/seed.js",
     "create-admin": "node seed/createAdmin.js",
     "seed-categories": "node seed/seedCategories.js",
+    "migrate:cloudinary": "node scripts/migrateUploadsToCloudinary.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",
+    "cloudinary": "^1.41.3",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
@@ -24,6 +26,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.9.5",
     "multer": "^2.4.0",
+    "multer-storage-cloudinary": "^4.0.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {

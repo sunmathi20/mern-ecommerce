@@ -1,59 +1,67 @@
-import path from 'path';
-import fs from 'fs';
+﻿/**
+ * uploadRoutes.js — Cloudinary-backed image upload.
+ * Uses multer memoryStorage + Cloudinary upload stream.
+ * Local disk is never written to; Cloudinary returns a secure URL.
+ */
 import express from 'express';
 import multer from 'multer';
+import { v2 as cloudinary } from 'cloudinary';
 import { protect, admin } from '../middleware/authMiddleware.js';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 const router = express.Router();
 
-// Ensure uploads directory exists
-const uploadDir = path.resolve('uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
+// Keep file in memory — no disk write
+const storage = multer.memoryStorage();
 
-// Multer disk storage configuration
-const storage = multer.diskStorage({
-  destination(req, file, cb) {
-    cb(null, 'uploads/');
-  },
-  filename(req, file, cb) {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const cleanName = path.basename(file.originalname, ext).replace(/[^\w-]/g, '');
-    cb(null, `${cleanName}-${Date.now()}-${Math.round(Math.random() * 1e6)}${ext}`);
-  },
-});
-
-// File filter for safe luxury images
 const fileFilter = (req, file, cb) => {
-  const allowedExtensions = /jpe?g|png|webp|svg/i;
-  const allowedMimeTypes = /^image\/(jpe?g|png|webp|svg\+xml)$/i;
-
-  const extname = allowedExtensions.test(path.extname(file.originalname).toLowerCase());
-  const mimetype = allowedMimeTypes.test(file.mimetype);
-
-  if (extname && mimetype) {
+  const allowed = /^image\/(jpe?g|png|webp|svg\+xml)$/i;
+  if (allowed.test(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Only JPEG, PNG, WEBP, and SVG image files are allowed.'));
+    cb(new Error('Only JPEG, PNG, WEBP, and SVG images are allowed.'));
   }
 };
 
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
   fileFilter,
 });
+
+/** Helper: upload buffer to Cloudinary via upload_stream */
+const uploadToCloudinary = (buffer, mimetype) => {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: 'aurelia-products',
+        resource_type: 'image',
+        quality: 'auto',
+        fetch_format: 'auto',
+      },
+      (err, result) => {
+        if (err) return reject(err);
+        resolve(result);
+      }
+    );
+    stream.end(buffer);
+  });
+};
 
 // @desc    Upload single image
 // @route   POST /api/upload
 // @access  Private/Admin
 router.post('/', protect, admin, (req, res) => {
-  upload.single('image')(req, res, (err) => {
+  upload.single('image')(req, res, async (err) => {
     if (err instanceof multer.MulterError) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ message: 'File size exceeds 5MB limit.' });
-      }
       return res.status(400).json({ message: err.message });
     } else if (err) {
       return res.status(400).json({ message: err.message });
@@ -63,13 +71,18 @@ router.post('/', protect, admin, (req, res) => {
       return res.status(400).json({ message: 'No image file uploaded.' });
     }
 
-    const normalizedPath = `/${req.file.path.replace(/\\/g, '/')}`;
-    res.status(201).json({
-      message: 'Image uploaded successfully',
-      image: normalizedPath,
-      filename: req.file.filename,
-      size: req.file.size,
-    });
+    try {
+      const result = await uploadToCloudinary(req.file.buffer, req.file.mimetype);
+      res.status(201).json({
+        message: 'Image uploaded successfully',
+        image: result.secure_url,
+        publicId: result.public_id,
+        size: req.file.size,
+      });
+    } catch (cloudErr) {
+      console.error('Cloudinary upload error:', cloudErr);
+      res.status(500).json({ message: 'Failed to upload image to Cloudinary.' });
+    }
   });
 });
 
@@ -77,11 +90,8 @@ router.post('/', protect, admin, (req, res) => {
 // @route   POST /api/upload/multiple
 // @access  Private/Admin
 router.post('/multiple', protect, admin, (req, res) => {
-  upload.array('images', 6)(req, res, (err) => {
+  upload.array('images', 6)(req, res, async (err) => {
     if (err instanceof multer.MulterError) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ message: 'One or more files exceed 5MB limit.' });
-      }
       return res.status(400).json({ message: err.message });
     } else if (err) {
       return res.status(400).json({ message: err.message });
@@ -91,11 +101,19 @@ router.post('/multiple', protect, admin, (req, res) => {
       return res.status(400).json({ message: 'No image files uploaded.' });
     }
 
-    const images = req.files.map((file) => `/${file.path.replace(/\\/g, '/')}`);
-    res.status(201).json({
-      message: `${req.files.length} image(s) uploaded successfully`,
-      images,
-    });
+    try {
+      const uploads = await Promise.all(
+        req.files.map((f) => uploadToCloudinary(f.buffer, f.mimetype))
+      );
+      const images = uploads.map((r) => r.secure_url);
+      res.status(201).json({
+        message: `${images.length} image(s) uploaded successfully`,
+        images,
+      });
+    } catch (cloudErr) {
+      console.error('Cloudinary upload error:', cloudErr);
+      res.status(500).json({ message: 'Failed to upload images to Cloudinary.' });
+    }
   });
 });
 
